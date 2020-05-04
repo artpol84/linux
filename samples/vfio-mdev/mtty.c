@@ -64,6 +64,10 @@
 				(((u64)(1) << MTTY_VFIO_PCI_OFFSET_SHIFT) - 1)
 #define MAX_MTTYS	24
 
+/* Maximum pages of 4K for upto 2G RAM can be pinned */
+#define MAX_GPFN_COUNT	(512 * 1024)
+#define PFN_NULL	(~0UL)
+
 /*
  * Global Structures
  */
@@ -141,6 +145,10 @@ struct mdev_state {
 	struct mutex rxtx_lock;
 	struct vfio_device_info dev_info;
 	int nr_ports;
+
+	/* List of pinned gpfns, gpfn as index and content is translated hpfn */
+	unsigned long *gpfn_to_hpfn;
+	struct notifier_block nb;
 };
 
 static struct mutex mdev_list_lock;
@@ -745,6 +753,17 @@ static int mtty_create(struct kobject *kobj, struct mdev_device *mdev)
 		return -ENOMEM;
 	}
 
+	mdev_state->gpfn_to_hpfn =
+		 kzalloc(sizeof(unsigned long) * MAX_GPFN_COUNT, GFP_KERNEL);
+	if (mdev_state->gpfn_to_hpfn == NULL) {
+		kfree(mdev_state->vconfig);
+		kfree(mdev_state);
+		return -ENOMEM;
+	}
+
+	memset(mdev_state->gpfn_to_hpfn, ~0,
+	       sizeof(unsigned long) * MAX_GPFN_COUNT);
+
 	mutex_init(&mdev_state->ops_lock);
 	mdev_state->mdev = mdev;
 	mdev_set_drvdata(mdev, mdev_state);
@@ -769,6 +788,7 @@ static int mtty_remove(struct mdev_device *mdev)
 		if (mdev_state == mds) {
 			list_del(&mdev_state->next);
 			mdev_set_drvdata(mdev, NULL);
+			kfree(mdev_state->gpfn_to_hpfn);
 			kfree(mdev_state->vconfig);
 			kfree(mdev_state);
 			ret = 0;
@@ -1246,15 +1266,95 @@ static long mtty_ioctl(struct mdev_device *mdev, unsigned int cmd,
 	return -ENOTTY;
 }
 
+static void unpin_pages_all(struct mdev_state *mdev_state)
+{
+	struct mdev_device *mdev = mdev_state->mdev;
+	unsigned long i;
+
+	mutex_lock(&mdev_state->ops_lock);
+	for (i = 0; i < MAX_GPFN_COUNT; i++) {
+		if (mdev_state->gpfn_to_hpfn[i] != PFN_NULL) {
+			int ret;
+
+			ret = vfio_unpin_pages(mdev_dev(mdev), &i, 1);
+			if (ret <= 0) {
+				pr_err("%s: 0x%lx unpin error %d\n",
+					 __func__, i, ret);
+				continue;
+			}
+			mdev_state->gpfn_to_hpfn[i] = PFN_NULL;
+		}
+	}
+	mutex_unlock(&mdev_state->ops_lock);
+}
+
+static int unmap_notifier(struct notifier_block *nb, unsigned long action,
+			  void *data)
+{
+	if (action == VFIO_IOMMU_NOTIFY_DMA_UNMAP) {
+		struct mdev_state *mdev_state = container_of(nb,
+							 struct mdev_state, nb);
+		struct mdev_device *mdev = mdev_state->mdev;
+		struct vfio_iommu_type1_dma_unmap *unmap = data;
+		unsigned long start = unmap->iova >> PAGE_SHIFT;
+		unsigned long end = (unmap->iova + unmap->size) >> PAGE_SHIFT;
+		unsigned long i;
+
+		mutex_lock(&mdev_state->ops_lock);
+		for (i = start; i < end; i++) {
+			if (mdev_state->gpfn_to_hpfn[i] != PFN_NULL) {
+				int ret;
+
+				ret = vfio_unpin_pages(mdev_dev(mdev), &i, 1);
+				if (ret <= 0) {
+					pr_err("%s: 0x%lx unpin error %d\n",
+							__func__, i, ret);
+					continue;
+				}
+				mdev_state->gpfn_to_hpfn[i] = PFN_NULL;
+			}
+		}
+		mutex_unlock(&mdev_state->ops_lock);
+
+	}
+	return 0;
+}
+
 static int mtty_open(struct mdev_device *mdev)
 {
+	unsigned long events = VFIO_IOMMU_NOTIFY_DMA_UNMAP;
+	struct mdev_state *mdev_state;
+	int ret;
+
 	pr_info("%s\n", __func__);
-	return 0;
+
+	if (!mdev)
+		return -EINVAL;
+
+	mdev_state = mdev_get_drvdata(mdev);
+	if (!mdev_state)
+		return -ENODEV;
+
+	mdev_state->nb.notifier_call = unmap_notifier;
+
+	ret = vfio_register_notifier(mdev_dev(mdev), VFIO_IOMMU_NOTIFY, &events,
+				     &mdev_state->nb);
+	return ret;
 }
 
 static void mtty_close(struct mdev_device *mdev)
 {
+	struct mdev_state *mdev_state;
+
 	pr_info("%s\n", __func__);
+
+	mdev_state = mdev_get_drvdata(mdev);
+	if (!mdev_state)
+		return;
+
+	unpin_pages_all(mdev_state);
+	vfio_unregister_notifier(mdev_dev(mdev), VFIO_IOMMU_NOTIFY,
+				 &mdev_state->nb);
 }
 
 static ssize_t
@@ -1293,8 +1393,82 @@ sample_mdev_dev_show(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR_RO(sample_mdev_dev);
 
+static ssize_t
+pin_pages_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct mdev_device *mdev = mdev_from_dev(dev);
+	struct mdev_state *mdev_state;
+	int i, count = 0;
+
+	if (!mdev)
+		return -EINVAL;
+
+	mdev_state = mdev_get_drvdata(mdev);
+	if (!mdev_state)
+		return -EINVAL;
+
+	mutex_lock(&mdev_state->ops_lock);
+	for (i = 0; i < MAX_GPFN_COUNT; i++) {
+		if (mdev_state->gpfn_to_hpfn[i] != PFN_NULL)
+			count++;
+	}
+	mutex_unlock(&mdev_state->ops_lock);
+	return sprintf(buf, "Pinned 0x%x pages\n", count);
+}
+
+static ssize_t
+pin_pages_store(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct mdev_device *mdev = mdev_from_dev(dev);
+	struct mdev_state *mdev_state;
+	unsigned long gpfn, hpfn;
+	int ret;
+
+	if (!mdev)
+		return -EINVAL;
+
+	mdev_state = mdev_get_drvdata(mdev);
+	if (!mdev_state)
+		return -EINVAL;
+
+	ret = kstrtoul(buf, 0, &gpfn);
+	if (ret)
+		return ret;
+
+	if (gpfn >= MAX_GPFN_COUNT) {
+		pr_err("Error 0x%lx > 0x%lx\n",
+		       gpfn, (unsigned long)MAX_GPFN_COUNT);
+		return -EINVAL;
+	}
+
+	mutex_lock(&mdev_state->ops_lock);
+
+	if (mdev_state->gpfn_to_hpfn[gpfn] != PFN_NULL) {
+		ret = -EEXIST;
+		goto out;
+	}
+
+	ret = vfio_pin_pages(mdev_dev(mdev), &gpfn, 1,
+			     IOMMU_READ | IOMMU_WRITE, &hpfn);
+
+	if (ret <= 0) {
+		pr_err("Failed to pin, ret %d\n", ret);
+		goto out;
+	}
+
+	mdev_state->gpfn_to_hpfn[gpfn] = hpfn;
+	ret = count;
+out:
+	mutex_unlock(&mdev_state->ops_lock);
+	return ret;
+}
+
+static DEVICE_ATTR_RW(pin_pages);
+
 static struct attribute *mdev_dev_attrs[] = {
 	&dev_attr_sample_mdev_dev.attr,
+	&dev_attr_pin_pages.attr,
 	NULL,
 };
 
