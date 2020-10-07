@@ -2605,6 +2605,7 @@ static int vfio_iommu_migration_build_caps(struct vfio_iommu *iommu,
 	/* support minimum pgsize */
 	cap_mig.pgsize_bitmap = (size_t)1 << __ffs(iommu->pgsize_bitmap);
 	cap_mig.max_dirty_bitmap_size = DIRTY_BITMAP_SIZE_MAX;
+    pr_err("cap_mig.pgsize_bitmap = %x", cap_mig.pgsize_bitmap);
 
 	return vfio_info_add_capability(caps, &cap_mig.header, sizeof(cap_mig));
 }
