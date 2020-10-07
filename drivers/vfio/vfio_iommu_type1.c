@@ -2607,7 +2607,8 @@ static int vfio_iommu_migration_build_caps(struct vfio_iommu *iommu,
 	cap_mig.max_dirty_bitmap_size = DIRTY_BITMAP_SIZE_MAX;
     pr_err("cap_mig.pgsize_bitmap = %llx, ps_bitmap = %llx", 
             (uint64_t)cap_mig.pgsize_bitmap, (uint64_t)iommu->pgsize_bitmap);
-
+    pr_err("vfio_iommu_migration_build_caps: flags=%x, pgs_map=%llx, maxdirt=%llx",
+            cap_mig.flags, cap_mig.pgsize_bitmap, cap_mig.max_dirty_bitmap_size);
 	return vfio_info_add_capability(caps, &cap_mig.header, sizeof(cap_mig));
 }
 
@@ -2619,6 +2620,8 @@ static int vfio_iommu_type1_get_info(struct vfio_iommu *iommu,
 	struct vfio_info_cap caps = { .buf = NULL, .size = 0 };
 	unsigned long capsz;
 	int ret;
+
+    pr_err("vfio_iommu_type1_get_info, start");
 
 	minsz = offsetofend(struct vfio_iommu_type1_info, iova_pgsizes);
 
@@ -2642,7 +2645,8 @@ static int vfio_iommu_type1_get_info(struct vfio_iommu *iommu,
 	info.iova_pgsizes = iommu->pgsize_bitmap;
 
 	ret = vfio_iommu_migration_build_caps(iommu, &caps);
-    pr_err("vfio_iommu_migration_build_caps, ret = %d", ret);
+    pr_err("vfio_iommu_migration_build_caps, ret = %d, caps.size=%ld",
+            ret, caps.size);
 	if (!ret)
 		ret = vfio_iommu_iova_build_caps(iommu, &caps);
 
@@ -2651,13 +2655,16 @@ static int vfio_iommu_type1_get_info(struct vfio_iommu *iommu,
 	if (ret)
 		return ret;
 
+    pr_err("vfio_iommu_type1_get_info: caps.size = %ld", caps.size);
 	if (caps.size) {
 		info.flags |= VFIO_IOMMU_INFO_CAPS;
 
 		if (info.argsz < sizeof(info) + caps.size) {
 			info.argsz = sizeof(info) + caps.size;
 		} else {
-			vfio_info_cap_shift(&caps, sizeof(info));
+            char outbuf[1024] = { 0 };
+            int i;
+ 			vfio_info_cap_shift(&caps, sizeof(info));
 			if (copy_to_user((void __user *)arg +
 					sizeof(info), caps.buf,
 					caps.size)) {
@@ -2665,6 +2672,10 @@ static int vfio_iommu_type1_get_info(struct vfio_iommu *iommu,
 				return -EFAULT;
 			}
 			info.cap_offset = sizeof(info);
+           for(i = 0; i < caps.size; i++){
+                sprintf(outbuf, "%s %hhx", outbuf, ((char*)caps.buf)[i]);
+            }
+            pr_err("%s", outbuf);
 		}
 
 		kfree(caps.buf);
