@@ -2673,7 +2673,7 @@ static int vfio_iommu_type1_get_info(struct vfio_iommu *iommu,
 			}
 			info.cap_offset = sizeof(info);
            for(i = 0; i < caps.size; i++){
-                sprintf(outbuf, "%s %hhx", outbuf, ((char*)caps.buf)[i]);
+                sprintf(outbuf, "%s %hhx", (char*)outbuf, ((char*)caps.buf)[i]);
             }
             pr_err("%s", outbuf);
 		}
