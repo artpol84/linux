@@ -910,6 +910,7 @@ static int handle_mig_read(unsigned int index, struct mdev_state *mdev_state,
 	switch (offset) {
 	case MIGRATION_INFO_OFFSET(device_state):	// 0x00
 		*(u32 *)buf = get_device_state(mdev_state);
+        pr_err("handle_mig_read: device_state = 0x%x", *(u32 *)buf); 
 		break;
 
 	case MIGRATION_INFO_OFFSET(pending_bytes):	// 0x08
@@ -917,6 +918,7 @@ static int handle_mig_read(unsigned int index, struct mdev_state *mdev_state,
 		if (ret)
 			break;
 		*(u64 *)buf = pending;
+        pr_err("handle_mig_read: pending_bytes = %lld", *(u64 *)buf); 
 		break;
 
 	case MIGRATION_INFO_OFFSET(data_offset):	// 0x10
@@ -926,10 +928,12 @@ static int handle_mig_read(unsigned int index, struct mdev_state *mdev_state,
 				break;
 		}
 		*(u64 *)buf = MTTY_MIGRATION_REGION_DATA_OFFSET;
+        pr_err("handle_mig_read: data_offset = %lld", *(u64 *)buf); 
 		break;
 
 	case MIGRATION_INFO_OFFSET(data_size):		// 0x18
 		*(u64 *)buf = mdev_state->saved_size;
+        pr_err("handle_mig_read: data_size = %lld", *(u64 *)buf); 
 		break;
 
 	default:
@@ -957,10 +961,12 @@ static int handle_mig_write(unsigned int index, struct mdev_state *mdev_state,
 	switch (offset) {
 	case MIGRATION_INFO_OFFSET(device_state):	// 0x00
 		ret = set_device_state(mdev_state, *(u32 *)buf);
+        pr_err("handle_mig_write: device_state = 0x%x", *(u32 *)buf); 
 		break;
 
 	case MIGRATION_INFO_OFFSET(data_size):		// 0x18
 		ret = resume_device_data(mdev_state, *(u64 *)buf);
+        pr_err("handle_mig_write: data_size = %lld", *(u64 *)buf); 
 		break;
 
 	case MIGRATION_INFO_OFFSET(pending_bytes):	// 0x08
